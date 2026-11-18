@@ -167,6 +167,7 @@ CallbackReturn TopicBasedSystem::on_init(const hardware_interface::HardwareInfo&
   return CallbackReturn::SUCCESS;
 }
 
+#if !HARDWARE_INTERFACE_VERSION_GTE(6, 0, 0)
 std::vector<hardware_interface::StateInterface> TopicBasedSystem::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
@@ -207,6 +208,7 @@ std::vector<hardware_interface::CommandInterface> TopicBasedSystem::export_comma
 
   return command_interfaces;
 }
+#endif  // !HARDWARE_INTERFACE_VERSION_GTE(6, 0, 0)
 
 hardware_interface::return_type TopicBasedSystem::read(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
@@ -251,9 +253,30 @@ hardware_interface::return_type TopicBasedSystem::read(const rclcpp::Time& /*tim
     }
   }
 
+#if HARDWARE_INTERFACE_VERSION_GTE(6, 0, 0)
+  // Since hardware_interface 6.0 the exported interfaces own their storage, so the latest states
+  // have to be copied into them instead of into memory the interfaces point to.
+  for (std::size_t i = 0; i < info_.joints.size(); ++i)
+  {
+    for (const auto& interface : info_.joints[i].state_interfaces)
+    {
+      auto it = std::find(standard_interfaces_.begin(), standard_interfaces_.end(), interface.name);
+      if (it == standard_interfaces_.end())
+      {
+        RCLCPP_WARN_ONCE(node_->get_logger(), "Joint '%s' has unsupported state interfaces found: %s.",
+                         info_.joints[i].name.c_str(), interface.name.c_str());
+        continue;
+      }
+      auto j = static_cast<std::size_t>(std::distance(standard_interfaces_.begin(), it));
+      set_state(info_.joints[i].name + "/" + interface.name, joint_states_[j][i]);
+    }
+  }
+#endif
+
   return hardware_interface::return_type::OK;
 }
 
+#if !HARDWARE_INTERFACE_VERSION_GTE(6, 0, 0)
 template <typename HandleType>
 bool TopicBasedSystem::getInterface(const std::string& name, const std::string& interface_name,
                                     const size_t vector_index, std::vector<std::vector<double>>& values,
@@ -268,9 +291,28 @@ bool TopicBasedSystem::getInterface(const std::string& name, const std::string& 
   }
   return false;
 }
+#endif
 
 hardware_interface::return_type TopicBasedSystem::write(const rclcpp::Time& /*time*/, const rclcpp::Duration& /*period*/)
 {
+#if HARDWARE_INTERFACE_VERSION_GTE(6, 0, 0)
+  // Fetch the latest commands set by the controller manager: since hardware_interface 6.0 the
+  // command storage resides in the exported interfaces themselves.
+  for (std::size_t i = 0; i < info_.joints.size(); ++i)
+  {
+    for (const auto& interface : info_.joints[i].command_interfaces)
+    {
+      auto it = std::find(standard_interfaces_.begin(), standard_interfaces_.end(), interface.name);
+      if (it == standard_interfaces_.end())
+      {
+        continue;
+      }
+      auto j = static_cast<std::size_t>(std::distance(standard_interfaces_.begin(), it));
+      joint_commands_[j][i] = get_command<double>(info_.joints[i].name + "/" + interface.name);
+    }
+  }
+#endif
+
   // To avoid spamming TopicBased's joint command topic we check the difference between the joint states and
   // the current joint commands, if it's smaller than a threshold we don't publish it.
   const auto diff = std::transform_reduce(
